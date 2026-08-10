@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Initial Admin Setup — StegoVault</title><link rel="stylesheet" href="/static/css/style.css"></head>
+<body class="auth-page"><main class="auth-shell"><a class="brand auth-brand" href="#"><span class="brand-mark">S</span><span>Stego<span>Vault</span></span></a>
+<section class="auth-card"><div class="eyebrow">FIRST-RUN SETUP</div><h1>Create the Admin account</h1><p class="auth-subtitle">This setup is available only until the first active Admin account is created. After that, Admin registration is permanently closed.</p>
+{% with messages=get_flashed_messages(with_categories=true) %}{% for category,message in messages %}<div class="flash {{ category }}">{{ message }}</div>{% endfor %}{% endwith %}
+<form method="post" class="auth-form" id="adminSetupForm">
+<input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+<div class="form-grid-2"><div><label>First name</label><input name="first_name" required maxlength="60"></div><div><label>Username</label><input name="username" required pattern="[A-Za-z0-9._-]{3,30}" maxlength="30"></div></div>
+<div class="form-grid-2"><div><label>Mobile number</label><input name="mobile" type="tel" required maxlength="16" placeholder="+919876543210"></div><div><label>Email address</label><input name="email" type="email" required maxlength="120"></div></div>
+<label>Password</label><input id="password" name="password" type="password" minlength="8" required autocomplete="new-password">
+<div class="password-rules" id="passwordRules"><span data-rule="length">✓ 8+ characters</span><span data-rule="upper">✓ Uppercase</span><span data-rule="lower">✓ Lowercase</span><span data-rule="number">✓ Number</span><span data-rule="special">✓ Special character</span><span data-rule="space">✓ No spaces</span></div>
+<label>Confirm password</label><input name="confirm_password" type="password" minlength="8" required autocomplete="new-password">
+<button class="primary-btn full auth-submit" type="submit">Create Admin Account <span>→</span></button></form>
+<p class="field-help" style="margin-top:16px">The Admin has complete application control, but the system will not expose secret messages to the Admin.</p>
+</section></main>
+<script>const pw=document.getElementById('password');function check(){const v=pw.value;const r={length:v.length>=8,upper:/[A-Z]/.test(v),lower:/[a-z]/.test(v),number:/\d/.test(v),special:/[^A-Za-z0-9]/.test(v),space:! /\s/.test(v)};Object.entries(r).forEach(([k,o])=>document.querySelector('[data-rule="'+k+'"]')?.classList.toggle('valid',o));}pw.addEventListener('input',check);check();</script></body></html>

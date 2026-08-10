@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: stegovault
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn --workers 2 --threads 4 --timeout 120 app:app
+    healthCheckPath: /healthz
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.8
+      - key: FLASK_ENV
+        value: production
+      - key: STEGOVAULT_DATA_DIR
+        value: /var/data
+      - key: DATABASE_PATH
+        value: /var/data/stegovault.db
+      - key: SECRET_KEY
+        generateValue: true
+      - key: MESSAGE_ENCRYPTION_KEY
+        sync: false
+    disk:
+      name: stegovault-data
+      mountPath: /var/data
+      sizeGB: 1

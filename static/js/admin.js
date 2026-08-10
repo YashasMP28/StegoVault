@@ -1,0 +1,6 @@
+const headers={'X-CSRF-Token':window.CSRF_TOKEN};
+async function post(url,data=null){const r=await fetch(url,{method:'POST',headers,...(data?{body:data}:{})});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||'Request failed');return j;}
+document.querySelectorAll('[data-request]').forEach(b=>b.onclick=async()=>{try{await post(`/api/admin/superuser/${b.dataset.request}/${b.dataset.action}`);location.reload()}catch(e){alert(e.message)}});
+document.querySelectorAll('.user-status').forEach(b=>b.onclick=async()=>{const fd=new FormData();fd.append('status',b.dataset.status);try{await post(`/api/admin/user/${b.dataset.user}/status`,fd);location.reload()}catch(e){alert(e.message)}});
+document.querySelectorAll('.remove-group').forEach(b=>b.onclick=async()=>{if(!confirm('Remove this Group from active Groups? Its members will lose access.'))return;try{await post(`/api/admin/group/${b.dataset.group}/remove`);location.reload()}catch(e){alert(e.message)}});
+document.querySelectorAll('.remove-superuser').forEach(b=>b.onclick=async()=>{if(!confirm('Remove this Super User and disable all Groups owned by them?'))return;try{await post(`/api/admin/superuser/${b.dataset.user}/remove`);location.reload()}catch(e){alert(e.message)}});

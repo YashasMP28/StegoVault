@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>{{ 'Create account' if mode == 'register' else 'Sign in' }} — StegoVault</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body class="auth-page">
+  <div class="bg-glow glow-one"></div><div class="bg-glow glow-two"></div>
+  <main class="auth-shell">
+    <a class="brand auth-brand" href="{{ url_for('login') }}"><span class="brand-mark">S</span><span>Stego<span>Vault</span></span></a>
+    <section class="auth-card">
+      <div class="eyebrow">PRIVATE ACCESS</div>
+      <h1>{{ 'Create your account' if mode == 'register' else 'Welcome back' }}</h1>
+      <p class="auth-subtitle">{{ 'Register as a normal user or submit a Super User request for Admin approval.' if mode == 'register' else 'Sign in to access your authorized StegoVault workspace.' }}</p>
+      {% with messages = get_flashed_messages(with_categories=true) %}
+        {% for category, message in messages %}<div class="flash {{ category }}">{{ message }}</div>{% endfor %}
+      {% endwith %}
+      <form method="post" class="auth-form" id="registrationForm">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        {% if mode == 'register' %}
+          <div class="form-grid-2">
+            <div><label for="first_name">First name</label><input id="first_name" name="first_name" type="text" autocomplete="given-name" maxlength="60" required></div>
+            <div><label for="username">Username</label><input id="username" name="username" type="text" autocomplete="username" maxlength="30" pattern="[A-Za-z0-9._-]{3,30}" required></div>
+          </div>
+          <div class="form-grid-2">
+            <div><label for="mobile">Mobile number</label><input id="mobile" name="mobile" type="tel" inputmode="tel" autocomplete="tel" placeholder="+919876543210" maxlength="16" required></div>
+            <div><label for="email">Email address</label><input id="email" name="email" type="email" autocomplete="email" maxlength="120" required></div>
+          </div>
+          <label>Account type</label>
+          <div class="account-type-grid">
+            <label class="choice-card"><input type="radio" name="account_type" value="USER" checked><span><strong>Normal User</strong><small>Join a Group after registration.</small></span></label>
+            <label class="choice-card"><input type="radio" name="account_type" value="SUPER_USER"><span><strong>Super User</strong><small>Request business Group administration.</small></span></label>
+          </div>
+          <div id="superUserFields" class="super-request-box hidden">
+            <div class="eyebrow">SUPER USER REQUEST</div>
+            <label for="group_name">Company / Group name</label>
+            <input id="group_name" name="group_name" type="text" maxlength="100" placeholder="Example: ABC Secure Communications">
+            <label for="description">Purpose / description for Admin</label>
+            <textarea id="description" name="description" minlength="20" maxlength="1000" placeholder="Explain why you need to create this Group, the business purpose, and how it will be used."></textarea>
+            <small class="field-help">Required for Admin review. Minimum 20 characters.</small>
+          </div>
+        {% else %}
+          <label for="email">Email address</label><input id="email" name="email" type="email" autocomplete="email" required>
+        {% endif %}
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" minlength="8" autocomplete="{{ 'new-password' if mode == 'register' else 'current-password' }}" required>
+        {% if mode == 'register' %}
+          <div class="password-rules" id="passwordRules">
+            <span data-rule="length">✓ 8+ characters</span><span data-rule="upper">✓ Uppercase</span><span data-rule="lower">✓ Lowercase</span><span data-rule="number">✓ Number</span><span data-rule="special">✓ Special character</span><span data-rule="space">✓ No spaces</span>
+          </div>
+          <label for="confirm_password">Confirm password</label><input id="confirm_password" name="confirm_password" type="password" minlength="8" autocomplete="new-password" required>
+        {% endif %}
+        <button class="primary-btn full auth-submit" type="submit">{{ 'Create account' if mode == 'register' else 'Sign in' }} <span>→</span></button>
+      </form>
+      <div class="auth-switch">{% if mode == 'register' %}Already registered? <a href="{{ url_for('login') }}">Sign in</a>{% else %}New user? <a href="{{ url_for('register') }}">Create an account</a>{% endif %}</div>
+    </section>
+  </main>
+{% if mode == 'register' %}
+<script>
+const typeFields=document.getElementById('superUserFields');
+document.querySelectorAll('input[name="account_type"]').forEach(r=>r.addEventListener('change',()=>{const on=document.querySelector('input[name="account_type"]:checked').value==='SUPER_USER';typeFields.classList.toggle('hidden',!on);document.getElementById('group_name').required=on;document.getElementById('description').required=on;}));
+const pw=document.getElementById('password');
+function checkPassword(){const v=pw.value;const rules={length:v.length>=8,upper:/[A-Z]/.test(v),lower:/[a-z]/.test(v),number:/\d/.test(v),special:/[^A-Za-z0-9]/.test(v),space:! /\s/.test(v)};Object.entries(rules).forEach(([k,ok])=>document.querySelector(`[data-rule="${k}"]`)?.classList.toggle('valid',ok));}
+pw.addEventListener('input',checkPassword);checkPassword();
+</script>
+{% endif %}
+</body></html>
