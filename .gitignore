@@ -1,8 +1,30 @@
+# Python virtual environment
+venv/
+.venv/
+env/
+
+# Python cache
 __pycache__/
 *.pyc
-.venv/
-instance/
-.env
-.DS_Store
+*.pyo
+*.pyd
 
+# Environment / secrets
+.env
+
+# Local database
+*.db
+*.sqlite
+*.sqlite3
+
+# Instance / runtime files
+instance/
 instance/.session.key
+
+# IDE
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db

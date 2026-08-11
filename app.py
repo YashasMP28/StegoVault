@@ -14,6 +14,55 @@ except ImportError:
     PGIntegrityError = Exception
 import base64
 import re
+def valid_username(username):
+    """Validate username: 3-30 characters, letters/numbers/dot/underscore/hyphen."""
+    if not username:
+        return False
+
+    return bool(
+        re.fullmatch(r"[A-Za-z0-9._-]{3,30}", username)
+    )
+def valid_email(email):
+    """Validate a basic RFC-style email address."""
+    if not email:
+        return False
+
+    return bool(
+        re.fullmatch(
+            r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@"
+            r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+            r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+",
+            email,
+        )
+    )
+
+
+def valid_mobile(mobile):
+    """Validate mobile number: optional + followed by 10-15 digits."""
+    if not mobile:
+        return False
+
+    return bool(re.fullmatch(r"\+?[0-9]{10,15}", mobile))
+
+
+def password_errors(password):
+    """Return human-readable password policy failures."""
+    errors = []
+
+    if len(password) < 8:
+        errors.append("at least 8 characters")
+    if not re.search(r"[A-Z]", password):
+        errors.append("one uppercase letter")
+    if not re.search(r"[a-z]", password):
+        errors.append("one lowercase letter")
+    if not re.search(r"[0-9]", password):
+        errors.append("one number")
+    if not re.search(r"[^A-Za-z0-9]", password):
+        errors.append("one special character")
+
+    return errors
+
+
 from datetime import datetime
 
 import cv2
@@ -680,11 +729,34 @@ def register():
         else:
             try:
                 db = get_db()
-                cur = db.execute(
-                    "INSERT INTO users(name,first_name,username,mobile,email,password_hash,role,status) VALUES(?,?,?,?,?,?,?,?) RETURNING id",
-                    (first_name, first_name, username, mobile, email, generate_password_hash(password), "USER", "ACTIVE")
+                user_values = (
+                    first_name,
+                    first_name,
+                    username,
+                    mobile,
+                    email,
+                    generate_password_hash(password),
+                    "USER",
+                    "ACTIVE",
                 )
-                user_id = cur.fetchone()["id"] if app.config.get("DATABASE_URL") else cur.lastrowid
+
+                # SQLite must not leave a RETURNING statement open when COMMIT
+                # is called. PostgreSQL can safely use RETURNING here.
+                if app.config.get("DATABASE_URL"):
+                    cur = db.execute(
+                        "INSERT INTO users(name,first_name,username,mobile,email,password_hash,role,status) "
+                        "VALUES(?,?,?,?,?,?,?,?) RETURNING id",
+                        user_values,
+                    )
+                    user_id = cur.fetchone()["id"]
+                else:
+                    cur = db.execute(
+                        "INSERT INTO users(name,first_name,username,mobile,email,password_hash,role,status) "
+                        "VALUES(?,?,?,?,?,?,?,?)",
+                        user_values,
+                    )
+                    user_id = cur.lastrowid
+
                 if account_type == "SUPER_USER":
                     db.execute(
                         "INSERT INTO superuser_requests(user_id,group_name,description,reason,status,reviewed_at) VALUES(?,?,?,?,?,NULL)",
@@ -811,8 +883,31 @@ def create_group():
     try:
         db=get_db(); group_key = AESGCM.generate_key(bit_length=256)
         wrapped_group_key = message_cipher.encrypt(group_key)
-        cur=db.execute("INSERT INTO groups(name,description,super_user_id,access_username,access_password_hash,encryption_key_encrypted) VALUES(?,?,?,?,?,?) RETURNING id", (name,description,current_user()["id"],access_username,generate_password_hash(access_password),wrapped_group_key))
-        group_id = cur.fetchone()["id"] if app.config.get("DATABASE_URL") else cur.lastrowid
+        group_values = (
+            name,
+            description,
+            current_user()["id"],
+            access_username,
+            generate_password_hash(access_password),
+            wrapped_group_key,
+        )
+
+        # Use lastrowid for SQLite so no RETURNING cursor remains active at COMMIT.
+        if app.config.get("DATABASE_URL"):
+            cur = db.execute(
+                "INSERT INTO groups(name,description,super_user_id,access_username,"
+                "access_password_hash,encryption_key_encrypted) VALUES(?,?,?,?,?,?) RETURNING id",
+                group_values,
+            )
+            group_id = cur.fetchone()["id"]
+        else:
+            cur = db.execute(
+                "INSERT INTO groups(name,description,super_user_id,access_username,"
+                "access_password_hash,encryption_key_encrypted) VALUES(?,?,?,?,?,?)",
+                group_values,
+            )
+            group_id = cur.lastrowid
+
         db.commit(); return jsonify(ok=True, group_id=group_id)
     except (sqlite3.IntegrityError, PGIntegrityError):
         if app.config.get("DATABASE_URL"):
