@@ -3,6 +3,15 @@ import io
 import os
 import secrets
 import sqlite3
+
+try:
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+    from psycopg2 import IntegrityError as PGIntegrityError
+except ImportError:
+    psycopg2 = None
+    RealDictCursor = None
+    PGIntegrityError = Exception
 import base64
 import re
 from datetime import datetime
@@ -21,11 +30,12 @@ app.config["MAX_CONTENT_LENGTH"] = 20 * 1024 * 1024
 app.config["ENVIRONMENT"] = os.environ.get("FLASK_ENV", "production" if os.environ.get("RENDER") else "development")
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 
-# Local development uses ./instance. Render production uses its persistent disk
-# when STEGOVAULT_DATA_DIR=/var/data is configured.
+# Local development uses ./instance when DATABASE_URL is not configured.
+# Render production uses managed PostgreSQL through DATABASE_URL.
 data_dir = os.environ.get("STEGOVAULT_DATA_DIR") or app.instance_path
 os.makedirs(data_dir, exist_ok=True)
 app.config["DATA_DIR"] = data_dir
+app.config["DATABASE_URL"] = os.environ.get("DATABASE_URL")
 app.config["DATABASE"] = os.environ.get("DATABASE_PATH") or os.path.join(data_dir, "stegovault.db")
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
@@ -71,11 +81,39 @@ SECURE_AUTH_TAG_SIZE = 16
 SECURE_OVERHEAD = SECURE_HEADER_SIZE + SECURE_AUTH_TAG_SIZE
 
 
+class PostgresDB:
+    def __init__(self, url):
+        if psycopg2 is None:
+            raise RuntimeError("psycopg2-binary is required when DATABASE_URL is configured.")
+        self.conn = psycopg2.connect(url)
+
+    @staticmethod
+    def _convert(sql):
+        return sql.replace("?", "%s")
+
+    def execute(self, sql, params=()):
+        cur = self.conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute(self._convert(sql), params)
+        return cur
+
+    def commit(self):
+        self.conn.commit()
+
+    def rollback(self):
+        self.conn.rollback()
+
+    def close(self):
+        self.conn.close()
+
+
 def get_db():
     if "db" not in g:
-        g.db = sqlite3.connect(app.config["DATABASE"])
-        g.db.row_factory = sqlite3.Row
-        g.db.execute("PRAGMA foreign_keys = ON")
+        if app.config.get("DATABASE_URL"):
+            g.db = PostgresDB(app.config["DATABASE_URL"])
+        else:
+            g.db = sqlite3.connect(app.config["DATABASE"])
+            g.db.row_factory = sqlite3.Row
+            g.db.execute("PRAGMA foreign_keys = ON")
     return g.db
 
 
@@ -87,43 +125,20 @@ def close_db(_exception=None):
 
 
 def column_exists(db, table, column):
+    if app.config.get("DATABASE_URL"):
+        row = db.execute(
+            "SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name=? AND column_name=?",
+            (table, column),
+        ).fetchone()
+        return row is not None
     return any(r[1] == column for r in db.execute(f"PRAGMA table_info({table})").fetchall())
 
 
-def valid_email(email):
-    return bool(EMAIL_RE.fullmatch(email or ""))
-
-
-def valid_username(username):
-    return bool(USERNAME_RE.fullmatch(username or ""))
-
-
-def valid_mobile(mobile):
-    return bool(MOBILE_RE.fullmatch(mobile or ""))
-
-
-def password_errors(password):
-    errors = []
-    if len(password) < 8: errors.append("at least 8 characters")
-    if not re.search(r"[A-Z]", password): errors.append("one uppercase letter")
-    if not re.search(r"[a-z]", password): errors.append("one lowercase letter")
-    if not re.search(r"\d", password): errors.append("one number")
-    if not re.search(r"[^A-Za-z0-9]", password): errors.append("one special character")
-    if re.search(r"\s", password): errors.append("no spaces")
-    return errors
-
-
-def password_policy_text():
-    return "Password must contain at least 8 characters, one uppercase letter, one lowercase letter, one number and one special character, with no spaces."
-
-
-def init_db():
-    db = sqlite3.connect(app.config["DATABASE"])
-    db.execute("PRAGMA foreign_keys = ON")
-    db.executescript(
-        """
+def _init_postgres():
+    db = PostgresDB(app.config["DATABASE_URL"])
+    db.execute("""
         CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id BIGSERIAL PRIMARY KEY,
             name TEXT NOT NULL,
             first_name TEXT,
             username TEXT UNIQUE,
@@ -132,109 +147,111 @@ def init_db():
             password_hash TEXT NOT NULL,
             role TEXT NOT NULL DEFAULT 'USER',
             status TEXT NOT NULL DEFAULT 'ACTIVE',
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
         CREATE TABLE IF NOT EXISTS superuser_requests (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL UNIQUE,
+            id BIGSERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
             group_name TEXT,
             description TEXT,
             reason TEXT,
             status TEXT NOT NULL DEFAULT 'PENDING',
-            reviewed_at TEXT,
-            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            reviewed_at TIMESTAMPTZ
         );
         CREATE TABLE IF NOT EXISTS groups (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id BIGSERIAL PRIMARY KEY,
             name TEXT NOT NULL UNIQUE,
             description TEXT,
-            super_user_id INTEGER NOT NULL,
+            super_user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
             access_username TEXT NOT NULL UNIQUE,
             access_password_hash TEXT NOT NULL,
-            encryption_key_encrypted BLOB,
+            encryption_key_encrypted BYTEA,
             status TEXT NOT NULL DEFAULT 'ACTIVE',
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY(super_user_id) REFERENCES users(id) ON DELETE RESTRICT
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
         CREATE TABLE IF NOT EXISTS group_members (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            group_id INTEGER NOT NULL,
-            user_id INTEGER NOT NULL,
+            id BIGSERIAL PRIMARY KEY,
+            group_id BIGINT NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+            user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             status TEXT NOT NULL DEFAULT 'ACTIVE',
-            joined_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(group_id, user_id),
-            FOREIGN KEY(group_id) REFERENCES groups(id) ON DELETE CASCADE,
-            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            joined_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(group_id, user_id)
         );
         CREATE TABLE IF NOT EXISTS group_join_requests (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            group_id INTEGER NOT NULL,
-            user_id INTEGER NOT NULL,
+            id BIGSERIAL PRIMARY KEY,
+            group_id BIGINT NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+            user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             status TEXT NOT NULL DEFAULT 'PENDING',
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            reviewed_at TEXT,
-            UNIQUE(group_id, user_id),
-            FOREIGN KEY(group_id) REFERENCES groups(id) ON DELETE CASCADE,
-            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            reviewed_at TIMESTAMPTZ,
+            UNIQUE(group_id, user_id)
         );
         CREATE TABLE IF NOT EXISTS group_sessions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            group_id INTEGER NOT NULL,
-            user_id INTEGER NOT NULL,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY(group_id) REFERENCES groups(id) ON DELETE CASCADE,
-            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            id BIGSERIAL PRIMARY KEY,
+            group_id BIGINT NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+            user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
         CREATE TABLE IF NOT EXISTS activities (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            group_id INTEGER,
-            user_id INTEGER NOT NULL,
+            id BIGSERIAL PRIMARY KEY,
+            group_id BIGINT REFERENCES groups(id) ON DELETE SET NULL,
+            user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             operation TEXT NOT NULL,
             original_filename TEXT,
             output_filename TEXT,
-            image_blob BLOB,
-            secret_message_encrypted BLOB,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            status TEXT NOT NULL DEFAULT 'SUCCESS',
-            FOREIGN KEY(group_id) REFERENCES groups(id) ON DELETE SET NULL,
-            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            image_blob BYTEA,
+            secret_message_encrypted BYTEA,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            status TEXT NOT NULL DEFAULT 'SUCCESS'
         );
-        """
-    )
-    # Upgrade databases created by Sprint 1.
-    if not column_exists(db, "users", "role"):
-        db.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'USER'")
-    if not column_exists(db, "users", "status"):
-        db.execute("ALTER TABLE users ADD COLUMN status TEXT NOT NULL DEFAULT 'ACTIVE'")
-    if not column_exists(db, "users", "first_name"):
-        db.execute("ALTER TABLE users ADD COLUMN first_name TEXT")
-    if not column_exists(db, "users", "username"):
-        db.execute("ALTER TABLE users ADD COLUMN username TEXT")
-    if not column_exists(db, "users", "mobile"):
-        db.execute("ALTER TABLE users ADD COLUMN mobile TEXT")
-    db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users(username) WHERE username IS NOT NULL")
-    db.execute("UPDATE users SET first_name=COALESCE(first_name,name) WHERE first_name IS NULL")
-    db.execute("UPDATE users SET username=COALESCE(username, 'user_' || id) WHERE username IS NULL")
-    if not column_exists(db, "superuser_requests", "group_name"):
-        db.execute("ALTER TABLE superuser_requests ADD COLUMN group_name TEXT")
-    if not column_exists(db, "superuser_requests", "description"):
-        db.execute("ALTER TABLE superuser_requests ADD COLUMN description TEXT")
-    if not column_exists(db, "groups", "description"):
-        db.execute("ALTER TABLE groups ADD COLUMN description TEXT")
-    if not column_exists(db, "groups", "encryption_key_encrypted"):
-        db.execute("ALTER TABLE groups ADD COLUMN encryption_key_encrypted BLOB")
-    db.execute("UPDATE superuser_requests SET description=COALESCE(description,reason) WHERE description IS NULL")
-
-    # Give every existing Group its own random 256-bit AES key. The key is wrapped
-    # with the server-only Fernet key and is never exposed to Admin API responses.
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users(username) WHERE username IS NOT NULL;
+    """)
+    # Wrap an AES key for every existing Group if this is an upgraded database.
     existing_groups = db.execute("SELECT id FROM groups WHERE encryption_key_encrypted IS NULL").fetchall()
     for row in existing_groups:
         group_key = AESGCM.generate_key(bit_length=256)
         wrapped_key = message_cipher.encrypt(group_key)
-        db.execute("UPDATE groups SET encryption_key_encrypted=? WHERE id=?", (wrapped_key, row[0]))
-
+        db.execute("UPDATE groups SET encryption_key_encrypted=? WHERE id=?", (wrapped_key, row["id"]))
     db.commit()
     db.close()
+
+
+def _init_sqlite():
+    # Preserve the existing local-development database behavior.
+    db = sqlite3.connect(app.config["DATABASE"])
+    db.execute("PRAGMA foreign_keys = ON")
+    db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, first_name TEXT, username TEXT UNIQUE, mobile TEXT, email TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'USER', status TEXT NOT NULL DEFAULT 'ACTIVE', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE IF NOT EXISTS superuser_requests (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL UNIQUE, group_name TEXT, description TEXT, reason TEXT, status TEXT NOT NULL DEFAULT 'PENDING', reviewed_at TEXT, FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE);
+        CREATE TABLE IF NOT EXISTS groups (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, description TEXT, super_user_id INTEGER NOT NULL, access_username TEXT NOT NULL UNIQUE, access_password_hash TEXT NOT NULL, encryption_key_encrypted BLOB, status TEXT NOT NULL DEFAULT 'ACTIVE', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(super_user_id) REFERENCES users(id) ON DELETE RESTRICT);
+        CREATE TABLE IF NOT EXISTS group_members (id INTEGER PRIMARY KEY AUTOINCREMENT, group_id INTEGER NOT NULL, user_id INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'ACTIVE', joined_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(group_id, user_id), FOREIGN KEY(group_id) REFERENCES groups(id) ON DELETE CASCADE, FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE);
+        CREATE TABLE IF NOT EXISTS group_join_requests (id INTEGER PRIMARY KEY AUTOINCREMENT, group_id INTEGER NOT NULL, user_id INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'PENDING', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, reviewed_at TEXT, UNIQUE(group_id, user_id), FOREIGN KEY(group_id) REFERENCES groups(id) ON DELETE CASCADE, FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE);
+        CREATE TABLE IF NOT EXISTS group_sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, group_id INTEGER NOT NULL, user_id INTEGER NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(group_id) REFERENCES groups(id) ON DELETE CASCADE, FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE);
+        CREATE TABLE IF NOT EXISTS activities (id INTEGER PRIMARY KEY AUTOINCREMENT, group_id INTEGER, user_id INTEGER NOT NULL, operation TEXT NOT NULL, original_filename TEXT, output_filename TEXT, image_blob BLOB, secret_message_encrypted BLOB, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, status TEXT NOT NULL DEFAULT 'SUCCESS', FOREIGN KEY(group_id) REFERENCES groups(id) ON DELETE SET NULL, FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE);
+        """
+    )
+    for column, ddl in [("role", "TEXT NOT NULL DEFAULT 'USER'"), ("status", "TEXT NOT NULL DEFAULT 'ACTIVE'"), ("first_name", "TEXT"), ("username", "TEXT"), ("mobile", "TEXT")]:
+        if not column_exists(db, "users", column): db.execute(f"ALTER TABLE users ADD COLUMN {column} {ddl}")
+    db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users(username) WHERE username IS NOT NULL")
+    db.execute("UPDATE users SET first_name=COALESCE(first_name,name) WHERE first_name IS NULL")
+    db.execute("UPDATE users SET username=COALESCE(username, 'user_' || id) WHERE username IS NULL")
+    for table, column, ddl in [("superuser_requests","group_name","TEXT"),("superuser_requests","description","TEXT"),("groups","description","TEXT"),("groups","encryption_key_encrypted","BLOB")]:
+        if not column_exists(db, table, column): db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+    db.execute("UPDATE superuser_requests SET description=COALESCE(description,reason) WHERE description IS NULL")
+    existing_groups = db.execute("SELECT id FROM groups WHERE encryption_key_encrypted IS NULL").fetchall()
+    for row in existing_groups:
+        group_key = AESGCM.generate_key(bit_length=256)
+        wrapped_key = message_cipher.encrypt(group_key)
+        db.execute("UPDATE groups SET encryption_key_encrypted=? WHERE id=?", (wrapped_key, row["id"] if app.config.get("DATABASE_URL") else row[0]))
+    db.commit(); db.close()
+
+
+def init_db():
+    if app.config.get("DATABASE_URL"):
+        _init_postgres()
+    else:
+        _init_sqlite()
 
 
 init_db()
@@ -664,10 +681,10 @@ def register():
             try:
                 db = get_db()
                 cur = db.execute(
-                    "INSERT INTO users(name,first_name,username,mobile,email,password_hash,role,status) VALUES(?,?,?,?,?,?,?,?)",
+                    "INSERT INTO users(name,first_name,username,mobile,email,password_hash,role,status) VALUES(?,?,?,?,?,?,?,?) RETURNING id",
                     (first_name, first_name, username, mobile, email, generate_password_hash(password), "USER", "ACTIVE")
                 )
-                user_id = cur.lastrowid
+                user_id = cur.fetchone()["id"] if app.config.get("DATABASE_URL") else cur.lastrowid
                 if account_type == "SUPER_USER":
                     db.execute(
                         "INSERT INTO superuser_requests(user_id,group_name,description,reason,status,reviewed_at) VALUES(?,?,?,?,?,NULL)",
@@ -678,7 +695,7 @@ def register():
                 if account_type == "SUPER_USER":
                     flash("Registration complete. Your Super User request is pending Admin approval.", "success")
                 return redirect(url_for("workspace"))
-            except sqlite3.IntegrityError as exc:
+            except (sqlite3.IntegrityError, PGIntegrityError) as exc:
                 if "username" in str(exc).lower():
                     flash("That username is already registered.", "error")
                 else:
@@ -729,7 +746,7 @@ def request_superuser():
     db = get_db()
     existing = db.execute("SELECT status FROM superuser_requests WHERE user_id=?", (current_user()["id"],)).fetchone()
     if existing and existing["status"] == "PENDING": return jsonify(error="Your request is already pending."), 400
-    db.execute("INSERT OR REPLACE INTO superuser_requests(user_id,group_name,description,reason,status,reviewed_at) VALUES(?,?,?,?,?,NULL)", (current_user()["id"],group_name,description,description,"PENDING"))
+    db.execute("INSERT INTO superuser_requests(user_id,group_name,description,reason,status,reviewed_at) VALUES(?,?,?,?,?,NULL) ON CONFLICT(user_id) DO UPDATE SET group_name=EXCLUDED.group_name, description=EXCLUDED.description, reason=EXCLUDED.reason, status=EXCLUDED.status, reviewed_at=NULL", (current_user()["id"],group_name,description,description,"PENDING"))
     db.commit(); return jsonify(ok=True, message="Super User request submitted to Admin.")
 
 
@@ -794,9 +811,13 @@ def create_group():
     try:
         db=get_db(); group_key = AESGCM.generate_key(bit_length=256)
         wrapped_group_key = message_cipher.encrypt(group_key)
-        cur=db.execute("INSERT INTO groups(name,description,super_user_id,access_username,access_password_hash,encryption_key_encrypted) VALUES(?,?,?,?,?,?)", (name,description,current_user()["id"],access_username,generate_password_hash(access_password),wrapped_group_key))
-        db.commit(); return jsonify(ok=True, group_id=cur.lastrowid)
-    except sqlite3.IntegrityError: return jsonify(error="Group name or access username is already in use."), 400
+        cur=db.execute("INSERT INTO groups(name,description,super_user_id,access_username,access_password_hash,encryption_key_encrypted) VALUES(?,?,?,?,?,?) RETURNING id", (name,description,current_user()["id"],access_username,generate_password_hash(access_password),wrapped_group_key))
+        group_id = cur.fetchone()["id"] if app.config.get("DATABASE_URL") else cur.lastrowid
+        db.commit(); return jsonify(ok=True, group_id=group_id)
+    except (sqlite3.IntegrityError, PGIntegrityError):
+        if app.config.get("DATABASE_URL"):
+            db.rollback()
+        return jsonify(error="Group name or access username is already in use."), 400
 
 
 @app.post("/api/group/request-access")
@@ -824,7 +845,7 @@ def review_group_request(group_id, req_id, action):
     if not row:return jsonify(error="Pending Group access request not found."),404
     status='APPROVED' if action=='approve' else 'REJECTED'
     if action=='approve':
-        db.execute("INSERT OR IGNORE INTO group_members(group_id,user_id,status) VALUES(?,?, 'ACTIVE')",(group_id,row["user_id"]))
+        db.execute("INSERT INTO group_members(group_id,user_id,status) VALUES(?,?, 'ACTIVE') ON CONFLICT(group_id,user_id) DO NOTHING",(group_id,row["user_id"]))
     db.execute("UPDATE group_join_requests SET status=?,reviewed_at=CURRENT_TIMESTAMP WHERE id=?",(status,req_id)); db.commit()
     return jsonify(ok=True,message=f"User {status.lower()} for {row['group_name']}.")
 

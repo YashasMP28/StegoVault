@@ -1,92 +1,55 @@
-# StegoVault Production Deployment (Render)
+# StegoVault — Free Demo Deployment on Render
 
-## Recommended production architecture
+This version uses **Render Free Web Service + Render Free PostgreSQL**. It does not use a persistent disk.
 
-Browser -> HTTPS -> Render -> Gunicorn -> Flask -> SQLite on Render Persistent Disk
+## Why PostgreSQL
 
-This deployment keeps the current application architecture unchanged. The persistent disk stores the database and server-side encryption/session keys. For higher traffic or multi-instance scaling, migrate the database to PostgreSQL in a later hardening sprint.
+Render Free web services have an ephemeral filesystem. A local SQLite database would be lost when the service restarts, redeploys, or spins down. Render provides Free PostgreSQL for persistent relational data, although the Free database expires after 30 days.
 
-## 1. Create a GitHub repository
+## Render Blueprint
 
-Create a new private GitHub repository, then from this project directory:
+`render.yaml` creates:
 
-```powershell
-git init
-git add .
-git commit -m "StegoVault production release"
-git branch -M main
-git remote add origin <YOUR_GITHUB_REPOSITORY_URL>
-git push -u origin main
-```
+- `stegovault` — Free Python web service
+- `stegovault-db` — Free PostgreSQL database
+- `DATABASE_URL` — automatically connected to the web service
+- generated `SECRET_KEY`
+- `MESSAGE_ENCRYPTION_KEY` supplied privately in the Render Dashboard
 
-Do NOT commit `.env`, credentials, or a production database containing real users.
+## Deploy
 
-## 2. Create the Render service
-
-1. Sign in to Render.
-2. New -> Blueprint.
+1. Push this repository to GitHub.
+2. In Render, choose **New → Blueprint**.
 3. Select the GitHub repository.
-4. Render will read `render.yaml`.
-5. The service uses Gunicorn and a 1 GB persistent disk.
+4. Render reads `render.yaml`.
+5. Choose the Free instance types when prompted.
+6. Enter a new `MESSAGE_ENCRYPTION_KEY` in the Render Dashboard.
+7. Deploy.
 
-A persistent disk is required because SQLite, the generated server keys, and the current application data must survive deploys/restarts. If your Render plan does not support persistent disks, do not deploy this SQLite configuration; use PostgreSQL instead.
-
-## 3. Set the production encryption key
-
-The `MESSAGE_ENCRYPTION_KEY` variable is used to wrap each Group's AES-256 key. It must be a valid Fernet key.
-
-Generate one locally:
+Generate the encryption key locally with:
 
 ```powershell
 python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
-Copy the output into Render as the value of `MESSAGE_ENCRYPTION_KEY`.
+Never commit that value to GitHub.
 
-Keep this value permanently. If it is lost, existing Group encryption keys cannot be unwrapped and existing encrypted secret messages cannot be recovered.
+## First production login
 
-`SECRET_KEY` is generated automatically by Render in the Blueprint. Keep it stable after deployment.
+The database starts empty. Open the live URL and use the first-run Admin setup page to create the production Admin.
 
-## 4. First production startup
+Do not upload your local SQLite database to GitHub or Render.
 
-Open the Render HTTPS URL. If the persistent database is new, the application redirects to `/admin/setup`.
+## Health check
 
-Create the first Admin account.
+`GET /healthz` verifies both the Flask process and PostgreSQL connection.
 
-Then:
+## Important Free-tier limitations
 
-- Register Super User
-- Approve Super User from Admin
-- Super User creates Group
-- Normal User registers
-- Normal User requests Group access
-- Super User approves User
-- User/Super User unlock the Group with Group credentials
-- Encode/Decode
+- Free web service sleeps after 15 minutes without inbound traffic.
+- The first request after sleep can take about a minute to wake the service.
+- Free PostgreSQL is 1 GB.
+- Free PostgreSQL expires 30 days after creation, with a 14-day upgrade grace period.
+- Free web services cannot use persistent disks.
 
-## 5. Health check
-
-Render checks:
-
-`/healthz`
-
-A healthy response is HTTP 200 with:
-
-```json
-{"status":"ok"}
-```
-
-## 6. Important production rules
-
-- Do not commit `instance/`, `.env`, database files, or encryption keys to GitHub.
-- Back up the Render persistent disk/database regularly.
-- Back up `MESSAGE_ENCRYPTION_KEY` in a secure password manager.
-- Never rotate `MESSAGE_ENCRYPTION_KEY` casually. Existing wrapped Group keys depend on it.
-- Use HTTPS only for production.
-- Keep the Admin account protected with a strong unique password.
-
-## 7. Current production limitation
-
-The current production configuration uses SQLite on a persistent Render disk so the working application can be deployed without changing the proven Sprint 5 data-access layer.
-
-For substantial concurrent traffic, the next hardening step should be PostgreSQL + a proper migration layer. That is recommended before scaling beyond a small/private deployment.
+This configuration is intended for a **client demo / evaluation deployment**, not permanent production hosting. Upgrade the database and web service before using it for long-term real users.

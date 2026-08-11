@@ -1,164 +1,67 @@
-# StegoVault — Private Group-Based Image Steganography
+# StegoVault
 
-StegoVault is a Flask web application for private image steganography with authenticated users, Admin/Super User/User roles, isolated Groups, and encrypted secret-message storage.
+StegoVault is a private, group-restricted image steganography web application.
 
-## Current sprint structure
+## Architecture
 
-### Sprint 1 — Private Web Application
-- Flask backend
-- HTML/CSS/JavaScript frontend
-- Registration and login
+- Python + Flask
+- HTML5 + CSS3 + JavaScript
+- PostgreSQL in production; SQLite remains available for local development
+- Role-based access: ADMIN / SUPER_USER / USER
+- Group-based authorization
+- AES-256-GCM encrypted secret payloads
 - 2-bit LSB image steganography
-- AES-256-GCM encrypted hidden payloads (STEGv3)
-- UTF-8 messages
-- PNG output
-- Image utilities
+- Gunicorn for production serving
+- Render deployment with managed PostgreSQL
 
-### Sprint 2 — Hierarchical Access Control
-- Admin → Super User → Group → User hierarchy
-- Admin approval for Super User requests
-- Group credentials
-- Group membership
-- Backend-enforced Group isolation
-- Group activity/audit
-- Admin metadata-only access to steganography activity
-- Admin cannot retrieve secret messages
-- Super Users can access content/activity for their own Group
+## Security model
 
+```text
+ADMIN
+  ├─ approves Super Users
+  ├─ manages Groups/accounts
+  └─ sees metadata, not secret messages
 
-### Sprint 5 — AES-256-GCM Secure Steganography
-- Secret message is encrypted **before** it is embedded in the image.
-- New payload format: `STEGv3`.
-- AES-256-GCM provides confidentiality and tamper detection.
-- Every encode uses a fresh random 96-bit nonce.
-- Every Group has a unique 256-bit encryption key.
-- The Group ID is authenticated as associated data, preventing cross-Group decryption.
-- Existing `STEGv2` images remain readable for compatibility; all new images use `STEGv3`.
-- Admin can still view audit/image metadata, but cannot use secret-message endpoints.
+SUPER_USER
+  ├─ owns a Group
+  ├─ enters the Group using Group credentials
+  └─ approves/rejects normal User access
 
-### Sprint 3 — Registration, Identity & Password Policy
-- First name
-- Unique username
-- Mobile number
-- Email validation
-- Strong password policy for all account roles
-- Normal User / Super User request selection during registration
-- Company / Group name for Super User requests
-- Required business purpose/description for Admin review
-- Admin request screen with applicant identity and purpose
-- Strong Group access passwords
-- Automatic SQLite schema upgrade for existing Sprint 2 databases
+USER
+  ├─ registers
+  ├─ requests Group access
+  └─ enters Group credentials after approval
+```
 
-## Password policy
+Secret message flow:
 
-Every account password must contain:
+```text
+Secret message
+      ↓
+AES-256-GCM
+      ↓
+Encrypted payload
+      ↓
+2-bit LSB
+      ↓
+Stego image
+```
 
-- At least 8 characters
-- 1 uppercase letter
-- 1 lowercase letter
-- 1 number
-- 1 special character
-- No spaces
+## Local development
 
-The Group access password follows the same policy.
-
-## Registration flow
-
-### Normal User
-
-`Register → Account created → Login → Wait for Group assignment`
-
-Required:
-- First name
-- Username
-- Mobile
-- Email
-- Password
-
-No Group name is required.
-
-### Super User request
-
-`Register → Select Super User → Company/Group name + business purpose → Account created → Admin review → Approve/Reject`
-
-Approval changes the account role to `SUPER_USER`.
-
-## Run locally
-
-```bash
-python -m venv .venv
-.venv\\Scripts\\activate
+```powershell
+python -m venv venv
+.\venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 python app.py
 ```
 
-Open:
+Without `DATABASE_URL`, the app uses `instance/stegovault.db` locally.
 
-`http://127.0.0.1:5000`
+## Render demo deployment
 
-## Admin bootstrap
+Push to GitHub and create a Render Blueprint using `render.yaml`.
 
-Set these environment variables before first startup:
+The Blueprint creates a Free Flask web service and Free PostgreSQL database. Supply `MESSAGE_ENCRYPTION_KEY` as a secret in Render.
 
-```text
-ADMIN_NAME=StegoVault Admin
-ADMIN_USERNAME=admin
-ADMIN_MOBILE=+919876543210
-ADMIN_EMAIL=admin@example.com
-ADMIN_PASSWORD=AdminPass1!
-```
-
-`ADMIN_PASSWORD` must satisfy the same strong-password policy.
-
-## Security model
-
-### Admin
-Can manage application accounts, approve Super Users, inspect Groups and audit metadata. Admin cannot read/decrypt secret messages.
-
-### Super User
-Can manage only Groups they own and the registered users assigned to those Groups. Super Users can view secret content inside their own Group.
-
-### User
-Can access only Groups in which they are an active member.
-
-The backend checks Group membership/ownership for every protected Group operation; changing a URL or API parameter does not bypass isolation.
-
-## Secret messages
-
-Secret messages are not stored as plaintext in the activity table. They are encrypted with Fernet using `MESSAGE_ENCRYPTION_KEY`.
-
-Admin-facing audit queries deliberately exclude the encrypted message field and there is no Admin secret-message endpoint.
-
-## Secure payload details
-
-A new encoded image contains a random nonce and authenticated AES-GCM ciphertext inside the LSB payload. Extracting the LSB data without the correct Group key produces ciphertext, not the original message. Any modification to the encrypted payload causes GCM authentication to fail.
-
-The cover image is intentionally **not** encrypted as a whole because StegoVault must remain a normal viewable image after encoding. The secret content is encrypted before hiding.
-
-Keep `instance/.message.key` private. In production, provide `MESSAGE_ENCRYPTION_KEY` through the deployment secret manager/environment instead of committing local key files.
-
-## Production
-
-Run with Gunicorn:
-
-```bash
-gunicorn app:app
-```
-
-For production, use:
-- Persistent PostgreSQL for accounts/groups/activity
-- Strong `SECRET_KEY`
-- Strong `MESSAGE_ENCRYPTION_KEY`
-- HTTPS
-- Secure deployment environment variables
-
-`render.yaml` is included as a deployment starting point.
-
-
-## First-run Admin setup
-
-The application no longer requires ADMIN_EMAIL/ADMIN_PASSWORD environment variables. On a fresh database, opening the app redirects to `/admin/setup`. Create the first Admin using the same password policy as every other account. Once an active Admin exists, `/admin/setup` is permanently closed and normal registration becomes available.
-
-## Sprint 4 update
-
-Normal Users are approved into Groups by the owning Super User. Admin only approves Super User requests and manages/removes Groups and accounts. Admin never receives secret message content.
+The Free PostgreSQL database is intended for demonstration/testing and expires after 30 days. Upgrade before long-term production use.
